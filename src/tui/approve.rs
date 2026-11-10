@@ -229,12 +229,21 @@ fn literal_glob(path: &str) -> String {
 /// that leaves the same question coming back.
 fn check_path_pattern(pattern: &str, path: &str) -> Result<(), String> {
     let compiled = crate::acl::path_glob(pattern).map_err(|error| format!("{error:#}"))?;
-    if !crate::acl::path_matches(&[compiled], path) {
-        return Err(format!(
-            "`{pattern}` does not cover {path}, the request being answered"
-        ));
+    if crate::acl::path_matches(&[compiled], path) {
+        return Ok(());
     }
-    Ok(())
+    // A trailing `*` meant as "everything under here" is the miss people make.
+    let deeper = pattern
+        .strip_suffix("/*")
+        .map(|parent| format!("{parent}/**"))
+        .filter(|deeper| {
+            crate::acl::path_glob(deeper)
+                .is_ok_and(|compiled| crate::acl::path_matches(&[compiled], path))
+        });
+    Err(match deeper {
+        Some(deeper) => format!("`*` stops at the next `/` — `{deeper}` covers this request"),
+        None => format!("`{pattern}` does not cover this request"),
+    })
 }
 
 /// The path row's pattern while it is being typed.
@@ -992,10 +1001,25 @@ mod tests {
             Some(Edit {
                 pattern: "/repos/acme/api/issues/109".into(),
                 cursor: 26,
+                error: Some("`/repos/acme/api/issues/109` does not cover this request".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn test_edit__when_trailing_star_misses_deeper_path__should_suggest_double_star() {
+        let mut dialogue = issue_edit();
+        press(&mut dialogue, "e");
+        press_key(&mut dialogue, KeyCode::Backspace, "issues/108".len());
+        press(&mut dialogue, "*");
+        assert!(dialogue.handle(KeyEvent::from(KeyCode::Enter)).is_none());
+        assert_eq!(
+            dialogue.edit,
+            Some(Edit {
+                pattern: "/repos/acme/api/*".into(),
+                cursor: 17,
                 error: Some(
-                    "`/repos/acme/api/issues/109` does not cover /repos/acme/api/issues/108, \
-                     the request being answered"
-                        .into()
+                    "`*` stops at the next `/` — `/repos/acme/api/**` covers this request".into()
                 ),
             })
         );
